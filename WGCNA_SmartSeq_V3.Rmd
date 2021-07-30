@@ -1,0 +1,398 @@
+---
+title: "WGNCA_SmartSeq_V2"
+output: html_document
+---
+
+# Set environment
+```{r}
+library(dplyr)
+library(Seurat)
+library(WGCNA)
+```
+
+Data came from: https://portal.brain-map.org/atlases-and-data/rnaseq/human-multiple-cortical-areas-smart-seq 
+
+# Limit data set to only motor cortex (MC)
+M1lm #lower limbs 
+M1ul #upper limbs
+```{bash}
+# Take the sample IDs from the cells originating from the MC
+cat metadata.csv | tr "," "\t" | grep -w 'M1ul\|M1lm' | awk '{print $1}' | sort -k1,1n > SampleID_MC_srt    #6235 cells
+# Limit the count matrix to the cells of the MC
+cat matrix.csv | sort -t ',' -k1,1n > matrix_srt.txt
+
+join -t ',' SampleID_MC_srt matrix_srt.txt > C
+cat  matrix.csv | head -n1 > matrix_MC.csv
+cat C  >> matrix_MC.csv
+
+# Limit the meta data matrix to the cells of the MC
+cat metadata.csv | sort -t ',' -k1,1n > metadata_srt.txt
+
+join -t ',' SampleID_MC_srt metadata_srt.txt > Y
+cat  metadata.csv | head -n1 > metadata_MC.csv
+cat Y  >> metadata_MC.csv
+```
+
+# Load the data
+```{r}
+MC.data <-read.csv('~/Documents/Minor research project/snSeq_MotorCortex/snSeq_MotorCortex/data/matrix_MC.csv', row.names = 1)
+MC.meta.data <- read.csv('~/Documents/Minor research project/snSeq_MotorCortex/snSeq_MotorCortex/data/metadata_MC.csv', row.names = 1)
+```
+
+# Make the MC Seurat object
+```{r}
+# Make rows into columns and the other way around  
+MC.data1 = data.frame(t(MC.data))
+
+# Make the Seurat object
+MC <- CreateSeuratObject(counts = MC.data1,  min.cells = 10, min.genes = 10, project = "MC")
+
+# Add meta data
+MC <-  AddMetaData(object = MC, 
+                       metadata = MC.meta.data)
+```
+
+# Calculate percentage mito and max UMI
+```{r}
+# % Mitochondrial genes
+MC[["percent.mt"]] <- PercentageFeatureSet(MC, pattern = "^MT-")
+
+##Z-score nUMI on a per sample basis
+nUMI.z <- data.frame(rownames(MC@meta.data), MC@meta.data$nCount_RNA)
+colnames(nUMI.z) <- c("cell",  "nUMI")
+nUMI.z <- nUMI.z  %>% mutate(nUMI.z = scale(nUMI))
+nUMI.z <- as.data.frame(nUMI.z)
+rownames(nUMI.z) <- nUMI.z$cell
+nUMI.z <- subset(nUMI.z, select = "nUMI.z")
+MC <-  AddMetaData(object = MC, metadata = nUMI.z, col.name = "nUMI.z")
+
+max.nUMI.MC <- max(MC@meta.data$nUMI)      
+```
+
+# Normalize the data
+```{r}
+MC <- NormalizeData(MC, normalization.method = "LogNormalize", scale.factor = max.nUMI.MC)
+MC <- FindVariableFeatures(MC, selection.method = "vst", nfeatures = 2000)
+```
+
+# Scale the data 
+```{r}
+rownames(MC)->all.genes
+ScaleData(MC, features=all.genes)->MC
+```
+
+#PCA
+```{r}
+MC <- RunPCA(object = MC, 
+                 features = VariableFeatures(object = MC))
+```
+
+# Cluster cells
+```{r}
+MC <- FindNeighbors(MC, dims=1:20)
+MC <- FindClusters(object = MC, resolution = 0.8)
+```
+
+# TSNE
+```{r}
+MC <- RunTSNE(MC,
+                  reduction.use = "pca",
+                  dims.use = 1:20,
+                  perplexity = 100)
+```
+
+
+# Subset for clusters and remove genes with expression in less than 50% of cells
+```{r}
+# Subset the 18 clusters
+clusters<-as.vector(c(1:18))
+for (cluster in clusters) {
+  name=as.character(paste("MC.c",cluster, sep=""))
+  assign(name, subset(MC, idents = as.numeric(paste(cluster))))
+}
+
+# Extract the normalized data 
+for (cluster in clusters) {
+  name=as.character(paste("MC.c", cluster, ".norm", sep=""))
+  y=(paste0("MC.c", cluster))
+  object=mget(y)
+  x=object[[1]]@assays$RNA@data
+  assign(name, as.data.frame(t(as.matrix(x))))
+}
+
+# Remove genes with over 50% zero values
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".norm"))
+  object=mget(y)
+  ##  Take half the number of cells 
+  nrow(object[[1]])->X; as.numeric(X)->X; X/2->X
+  ## Find the colums that have over half zero values
+  i <- colSums(object[[1]] == 0, na.rm=TRUE) < X
+  ## Remove these columns
+  name<-paste0("MC.c", cluster, ".keep", sep="")
+  assign(name, object[[1]][, i, drop=FALSE])
+}
+
+# Scale the data
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".keep"))
+  object=mget(y)
+  name=paste0("MC.c", cluster, ".scaled", sep="")
+  assign(name, as.data.frame(scale(object[[1]])))
+}
+
+```
+
+# 1. Data input, cleaning, and processing
+```{r}
+# Check for genes or cells with too many missing values
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".scaled"))
+  object=mget(y)
+  name=paste0("MC.c", cluster, ".gsg", sep="")
+  assign(name,  goodSamplesGenes(object[[1]], verbose = 3, minFraction = 1/2))
+}
+
+# Check if they all return TRUE
+MC.c1.gsg$allOK
+
+# Cluster the cells to see if there are any obvious outliers
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".scaled"))
+  object=mget(y)
+  sampleTree = hclust(dist(object[[1]]), method = "average");
+  sizeGrWindow(12,9)
+  par(cex = 0.6);
+  par(mar = c(0,4,2,0))
+  plot(sampleTree, main = paste("Sample clustering to detect outliers","cluster",cluster), sub="", xlab="", cex.lab = 1.5,
+  cex.axis = 1.5, cex.main = 2)
+}
+
+```
+
+## b. Step-by-step network construction and module detection:
+https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-man.pdf
+
+### Calculate the Soft Power Threshold
+```{r}
+options(stringsAsFactors = FALSE);
+
+# Automatic construction of the gene networks and identfication of modules: 
+## Choosing the soft-thresholding power: analysis of network topology. The function pickSoftThreshold  performs the analysis of network topology and aids the user in choosing a proper soft-thresholding power. The soft threshold is to reduce noice correlation and thereby creates a more centralized network (a few strong correlations, lot weak correlations). The user chooses a set of candidate powers (the function provides suitable default values), and the function returns a set of network indices that should be inspected, for example as follows:
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".scaled"))
+  object=mget(y)
+  # Call the network topology analysis function
+  sft=pickSoftThreshold(object[[1]], powerVector = powers, verbose = 5)
+  # Plot the results:
+  sizeGrWindow(9, 5)
+  par(mfrow = c(1,2));
+  cex1 = 0.9;
+  # Scale-free topology fit index as a function of the soft-thresholding power
+    plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n", main = paste("Scale independence","cluster",cluster));
+    text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+    labels=powers,cex=cex1,col="red");
+    # this line corresponds to using an R^2 cut-off of h
+    abline(h=0.90,col="red")
+  # Mean connectivity as a function of the soft-thresholding power
+    plot(sft$fitIndices[,1], sft$fitIndices[,5],
+    xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+    main = paste("Mean connectivity", "cluster",cluster))
+    text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+}
+```
+
+### Calculate Adjacencies and make TOM
+```{r}
+options(stringsAsFactors = FALSE);
+
+# We choose the power 5, which is the lowest power for which the scale-free topology fit index curve flattens out upon reaching a high value (in this case, roughly 0.90)
+softPower=5
+
+# Calculate adjacencies, TOM, and dissTOM
+ ## To minimize effects of noise and spurious associations, we transform the adjacency into Topological Overlap Matrix, and calculate the corresponding dissimilarity:
+  ### TOM is a measure for how many first neighbors different nodes share. Can correct for missing of faulty connections.
+for (cluster in clusters) {
+  y=(paste0("MC.c",cluster ,".scaled"))
+  object=mget(y)
+  name=paste("adjacency.", cluster, sep="")
+  assign(name, adjacency(object[[1]], power=softPower))
+  object1=mget(paste("adjacency.", cluster, sep=""))
+  name1=paste("TOM", cluster, sep="")
+  assign(name1, TOMsimilarity(object1[[1]]))
+  object2=mget(paste("TOM", cluster, sep=""))
+  name2=paste("dissTOM", cluster, sep="")
+  assign(name2, 1-object2[[1]])
+}
+
+```
+
+### Hierarchical clustering to produce a hierarchical clustering tree (dendrogram) of genes.
+```{r}
+for (cluster in clusters) {
+  object=mget(paste("dissTOM", cluster, sep=""))
+  # Call the hierarchical clustering function
+  assign(paste("geneTree.",cluster,sep=""), hclust(as.dist(object[[1]]), method = "average"));
+  # Plot the resulting clustering tree (dendrogram)
+  object=mget(paste("geneTree.",cluster, sep=""))
+  sizeGrWindow(12,9)
+  plot(object[[1]], xlab="", sub="", main = paste("Gene clustering on TOM-based dissimilarity","cluster",cluster),
+  labels = FALSE, hang = 0.04)
+}
+
+  # Each vertical line corresponds to a gene. Branches of the dendogram group together densely interconnected, highly co-expressed genes. Module identification amounts to the identification of individual branches (”cutting the branches off the dendrogram”). There are several methods for branch cutting; our standard method is the Dynamic Tree Cut from the package dynamicTreeCut. The next snippet of code illustrates its use
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 20;
+
+for (cluster in clusters) {
+  object=mget(paste("geneTree.",cluster ,sep=""))
+  object1=mget(paste("dissTOM", cluster, sep=""))
+  name=paste("dynamicMods.",cluster,sep="")
+  assign(name, cutreeDynamic(dendro = object[[1]], distM = object1[[1]], deepSplit = 2, pamRespectsDendro = FALSE, minClusterSize = minModuleSize))
+  print(paste("This is cluster", cluster))
+  print(table(mget(name)))
+  # Label 0 is reserved for unassigned genes. 
+  # Plot the module assignment under the gene dendrogram:
+  # Convert numeric lables into colors
+  name1=paste("dynamicColors.", cluster, sep="")
+  assign(name1, labels2colors(mget(name)))
+  object2=mget(name1)
+  print(table(object2[[1]]))
+  # Plot the dendrogram and colors underneath
+  sizeGrWindow(8,6)
+  plotDendroAndColors(object[[1]], object2[[1]], "Dynamic Tree Cut", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05, main = paste("Gene dendrogram and module colors", "cluster", cluster))
+}  
+```
+
+### Merging of modules whose expression profiles are very similar.
+```{r}
+  # The Dynamic Tree Cut may identify modules whose expression profiles are very similar. It may be prudent to merge such modules since their genes are highly co-expressed. To quantify co-expression similarity of entire modules, we calculate their eigengenes (sort of like PCA) and cluster them on their correlation:
+for (cluster in clusters) {
+  object=mget(paste0("MC.c",cluster,".scaled"))
+  dynamicColor=mget(paste0("dynamicColors.",cluster))
+  # Calculate eigengenes
+  X=moduleEigengenes(object[[1]], dynamicColor[[1]])
+  assign(paste0("MEs.", cluster),-X$eigengenes)
+  object1=mget(paste0("MEs.", cluster))
+  # Calculate dissimilarity of module eigengenes
+  Y=1-cor(object1[[1]])
+  # Cluster module eigengenes
+  assign(paste0("METree", cluster), hclust(as.dist(Y), method = "average"))
+  object2=mget(paste0("METree", cluster))
+  sizeGrWindow(7, 6)
+  plot(object2[[1]], main = paste("Clustering of module eigengenes","cluster",cluster),
+  xlab = "", sub = "")
+  MEDissThres = 0.25
+  # Plot the cut line into the dendrogram
+  abline(h=MEDissThres, col = "red")
+}
+
+# Merge the close modules
+MEDissThres = 0.25
+
+for (cluster in clusters) {
+ object=mget(paste0("MC.c",cluster,".scaled")) 
+ object1=mget(paste0("geneTree.",cluster))
+ dynamicColor=mget(paste0("dynamicColors.",cluster))
+ X <-mergeCloseModules(object[[1]], dynamicColor[[1]], cutHeight = MEDissThres, verbose = 3)
+ assign(paste0("moduleColors.", cluster), X$colors)
+ assign(paste0("MEs.", cluster), X$newMEs)
+ sizeGrWindow(12, 9)
+ plotDendroAndColors(object1[[1]], cbind(dynamicColor[[1]], X$colors), c(paste("Dynamic Tree Cut", "cluster", cluster), paste("Merged dynamic", "cluster", cluster)), dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+} 
+
+# # Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+for (cluster in clusters) {
+  object=mget(paste0("moduleColors.", cluster))
+  assign(paste0("moduleLabels.", cluster), match(object[[1]],colorOrder)-1)
+} 
+
+```
+
+# Write text file for every module for every cluster
+```{r}
+for (cluster in clusters) {
+  object=mget(paste0("MC.c",cluster,".scaled"))
+  object=object[[1]]
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  print(moduleColor)
+  n=length(modules)
+  for (i in 1:n) {
+    name=paste0("Cluster",cluster,"_",modules[i],".csv")
+    write.csv(names(object[moduleColor==modules[i]]), file=name)
+  }
+}
+```
+
+# Number of modules and genes within modules per cluster
+```{r}
+
+for (cluster in clusters) {
+   moduleColors=mget(paste0("moduleColors.",cluster))
+   moduleColors=moduleColors[[1]]
+   print(paste("This is cluster", cluster))
+   print(table(moduleColors))
+} 
+    
+```
+
+
+# 5. Network visualization using WGCNA functions
+https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-05-Visualization.pdf 
+
+## b. Exporting to Cytoscape
+```{r}
+# Recalculate topological overlap if needed
+for (cluster in clusters) {
+   object=mget(paste0("MC.c",cluster,".scaled")) 
+   TOM = TOMsimilarityFromExpr(object[[1]], power = 5)
+   probes=names(object[[1]])
+   moduleColors=mget(paste0("moduleColors.",cluster))
+   moduleColors=moduleColors[[1]]
+   modules=moduleColors%>%unique
+   modules=str_remove(modules, 'turquoise')
+   inModule = is.finite(match(moduleColors, modules));
+   modGenes = probes[inModule];
+   modTOM = TOM[inModule, inModule];
+   dimnames(modTOM) = list(modGenes, modGenes)
+   cyt = exportNetworkToCytoscape(modTOM, edgeFile = paste("Cluster",cluster,"-CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""), nodeFile = paste("Cluster",cluster,"-CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""), weighted = TRUE, threshold = 0.02, nodeNames = modGenes, nodeAttr = moduleColors[inModule]);
+}   
+
+# Open with Cytoscape: import the edges file by using the function "import network from file" and thereby specifying which columns are target and which are source nodes.
+```
+
+```{r}
+# FUS-containing clusters
+## CLuster 1 | brown
+## Cluster 18 | black
+## Cluster 12 | green
+
+# Select modules
+modules = c("green");
+# Select module probes
+probes = names(MC.c12.scaled)
+inModule = is.finite(match(moduleColors.12, modules));
+modGenes = probes[inModule];
+
+# Select the corresponding Topological Overlap
+modTOM = TOM12[inModule, inModule];
+dimnames(modTOM) = list(modGenes, modGenes)
+
+# Export the network into edge and node list files Cytoscape can read
+cyt = exportNetworkToCytoscape(modTOM,
+edgeFile = paste("C12_CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""),
+nodeFile = paste("C12_CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""),
+weighted = TRUE,
+threshold = 0.02,
+nodeNames = modGenes,
+altNodeNames = modGenes,
+nodeAttr = moduleColors[inModule]);
+```
+
