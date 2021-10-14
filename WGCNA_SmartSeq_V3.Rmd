@@ -57,6 +57,14 @@ MC <-  AddMetaData(object = MC,
 # % Mitochondrial genes
 MC[["percent.mt"]] <- PercentageFeatureSet(MC, pattern = "^MT-")
 
+##Z-score nGene 
+nGene.z <- data.frame(rownames(MC@meta.data), MC@meta.data$nFeature_RNA)
+colnames(nGene.z) <- c("cell",  "nGene")
+nGene.z <- nGene.z %>% mutate(nGene.z = scale(nGene))
+nGene.z <- as.data.frame(nGene.z)
+rownames(nGene.z) <- nGene.z$cell
+nGene.z <- subset(nGene.z, select = "nGene.z")
+
 ##Z-score nUMI on a per sample basis
 nUMI.z <- data.frame(rownames(MC@meta.data), MC@meta.data$nCount_RNA)
 colnames(nUMI.z) <- c("cell",  "nUMI")
@@ -66,6 +74,8 @@ rownames(nUMI.z) <- nUMI.z$cell
 nUMI.z <- subset(nUMI.z, select = "nUMI.z")
 MC <-  AddMetaData(object = MC, metadata = nUMI.z, col.name = "nUMI.z")
 
+# Subset 
+MC <- subset(MC, subset = nGene.z > -3 & nGene.z < 3   & nUMI.z > -3 & nUMI.z < 3)
 max.nUMI.MC <- max(MC@meta.data$nUMI)      
 ```
 
@@ -84,7 +94,8 @@ ScaleData(MC, features=all.genes)->MC
 #PCA
 ```{r}
 MC <- RunPCA(object = MC, 
-                 features = VariableFeatures(object = MC))
+             features = 
+               VariableFeatures(object = MC))
 ```
 
 # Cluster cells
@@ -99,8 +110,32 @@ MC <- RunTSNE(MC,
                   reduction.use = "pca",
                   dims.use = 1:20,
                   perplexity = 100)
+
 ```
 
+# Visualize clusters
+```{r}
+MC <- RunUMAP(MC, dims = 1:20)
+DimPlot(MC, reduction = "umap")
+
+```
+
+# Find marker genes 
+```{r}
+FindAllMarkers(MC, features=VariableFeatures.MC, logfc.threshold = 0.05)->MarkersVF.005.MC
+```
+
+# Vizualize gene expression
+```{r}
+VlnPlot(MC, features = c("PCP4","BCL11B", "EYA4"))
+```
+# Find average expression
+```{r}
+AverageExpression(MC)->AverageExpression
+as.data.frame(AverageExpression)->AverageExpression
+AverageExpression["SETX",]
+
+```
 
 # Subset for clusters and remove genes with expression in less than 50% of cells
 ```{r}
@@ -143,7 +178,7 @@ for (cluster in clusters) {
 
 ```
 
-# 1. Data input, cleaning, and processing
+# Data input, cleaning, and processing
 ```{r}
 # Check for genes or cells with too many missing values
 for (cluster in clusters) {
@@ -170,15 +205,15 @@ for (cluster in clusters) {
 
 ```
 
-## b. Step-by-step network construction and module detection:
-https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-man.pdf
+# Step-by-step network construction and module detection:
+
 
 ### Calculate the Soft Power Threshold
 ```{r}
 options(stringsAsFactors = FALSE);
 
 # Automatic construction of the gene networks and identfication of modules: 
-## Choosing the soft-thresholding power: analysis of network topology. The function pickSoftThreshold  performs the analysis of network topology and aids the user in choosing a proper soft-thresholding power. The soft threshold is to reduce noice correlation and thereby creates a more centralized network (a few strong correlations, lot weak correlations). The user chooses a set of candidate powers (the function provides suitable default values), and the function returns a set of network indices that should be inspected, for example as follows:
+## Choosing the soft-thresholding power: analysis of network topology. The function pickSoftThreshold  performs the analysis of network topology and aids the user in choosing a proper soft-thresholding power. The soft threshold is to reduce noice correlation and thereby creates a more centralized network (a few strong correlations, lot weak correlations). The user chooses a set of candidate powers, and the function returns a set of network indices that should be inspected
 
 # Choose a set of soft-thresholding powers
 powers = c(c(1:10), seq(from = 12, to=20, by=2))
@@ -206,11 +241,9 @@ for (cluster in clusters) {
 }
 ```
 
-### Calculate Adjacencies and make TOM
+## Calculate Adjacencies and make TOM
 ```{r}
 options(stringsAsFactors = FALSE);
-
-# We choose the power 5, which is the lowest power for which the scale-free topology fit index curve flattens out upon reaching a high value (in this case, roughly 0.90)
 softPower=5
 
 # Calculate adjacencies, TOM, and dissTOM
@@ -231,7 +264,7 @@ for (cluster in clusters) {
 
 ```
 
-### Hierarchical clustering to produce a hierarchical clustering tree (dendrogram) of genes.
+## Hierarchical clustering to produce a hierarchical clustering tree (dendrogram) of genes.
 ```{r}
 for (cluster in clusters) {
   object=mget(paste("dissTOM", cluster, sep=""))
@@ -244,8 +277,7 @@ for (cluster in clusters) {
   labels = FALSE, hang = 0.04)
 }
 
-  # Each vertical line corresponds to a gene. Branches of the dendogram group together densely interconnected, highly co-expressed genes. Module identification amounts to the identification of individual branches (”cutting the branches off the dendrogram”). There are several methods for branch cutting; our standard method is the Dynamic Tree Cut from the package dynamicTreeCut. The next snippet of code illustrates its use
-# We like large modules, so we set the minimum module size relatively high:
+  # Each vertical line corresponds to a gene. Branches of the dendogram group together densely interconnected, highly co-expressed genes. Module identification amounts to the identification of individual branches. There are several methods for branch cutting; the standard method is the Dynamic Tree Cut from the package dynamicTreeCut. 
 minModuleSize = 20;
 
 for (cluster in clusters) {
@@ -268,7 +300,7 @@ for (cluster in clusters) {
 }  
 ```
 
-### Merging of modules whose expression profiles are very similar.
+## Merging of modules whose expression profiles are very similar.
 ```{r}
   # The Dynamic Tree Cut may identify modules whose expression profiles are very similar. It may be prudent to merge such modules since their genes are highly co-expressed. To quantify co-expression similarity of entire modules, we calculate their eigengenes (sort of like PCA) and cluster them on their correlation:
 for (cluster in clusters) {
@@ -287,7 +319,7 @@ for (cluster in clusters) {
   plot(object2[[1]], main = paste("Clustering of module eigengenes","cluster",cluster),
   xlab = "", sub = "")
   MEDissThres = 0.25
-  # Plot the cut line into the dendrogram
+  # Plot thes cut line into the dendrogram
   abline(h=MEDissThres, col = "red")
 }
 
@@ -322,7 +354,6 @@ for (cluster in clusters) {
   moduleColor=mget(paste0("moduleColors.",cluster))
   moduleColor=moduleColor[[1]]
   modules=moduleColor%>%unique
-  print(moduleColor)
   n=length(modules)
   for (i in 1:n) {
     name=paste0("Cluster",cluster,"_",modules[i],".csv")
@@ -344,10 +375,8 @@ for (cluster in clusters) {
 ```
 
 
-# 5. Network visualization using WGCNA functions
-https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-05-Visualization.pdf 
-
-## b. Exporting to Cytoscape
+# Network visualization using WGCNA functions
+## Exporting to Cytoscape
 ```{r}
 # Recalculate topological overlap if needed
 for (cluster in clusters) {
@@ -368,31 +397,119 @@ for (cluster in clusters) {
 # Open with Cytoscape: import the edges file by using the function "import network from file" and thereby specifying which columns are target and which are source nodes.
 ```
 
+# Hub genes
 ```{r}
-# FUS-containing clusters
-## CLuster 1 | brown
-## Cluster 18 | black
-## Cluster 12 | green
-
-# Select modules
-modules = c("green");
-# Select module probes
-probes = names(MC.c12.scaled)
-inModule = is.finite(match(moduleColors.12, modules));
-modGenes = probes[inModule];
-
-# Select the corresponding Topological Overlap
-modTOM = TOM12[inModule, inModule];
-dimnames(modTOM) = list(modGenes, modGenes)
-
-# Export the network into edge and node list files Cytoscape can read
-cyt = exportNetworkToCytoscape(modTOM,
-edgeFile = paste("C12_CytoscapeInput-edges-", paste(modules, collapse="-"), ".txt", sep=""),
-nodeFile = paste("C12_CytoscapeInput-nodes-", paste(modules, collapse="-"), ".txt", sep=""),
-weighted = TRUE,
-threshold = 0.02,
-nodeNames = modGenes,
-altNodeNames = modGenes,
-nodeAttr = moduleColors[inModule]);
+chooseTopHubInEachModule(MC.c18.keep, moduleColors.18)
 ```
 
+# KEGG and GO
+## Prepare gene lists
+```{r}
+library(clusterProfiler)
+library(biomaRt)
+library(org.Hs.eg.db)
+library(ggplot2)
+library(enrichplot)
+library(magrittr)
+ensembl<-useMart("ensembl")
+#This shows all of the possible organisms to work with
+listDatasets(ensembl)
+#Here I'm defining which organism I am working with, in this case human
+ensembl <- useDataset("hsapiens_gene_ensembl",mart=ensembl)
+
+# Get the gene lists
+for (cluster in clusters) {
+  object=mget(paste0("MC.c",cluster,".scaled"))
+  object=object[[1]]
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  n=length(modules)
+  for (i in 1:n) {
+    name=paste0("Genelist.c",cluster,".",modules[i])
+   assign(name, names(object[moduleColor==modules[i]]))
+  }
+}
+
+# Get the entrez ids for the genes
+for (cluster in clusters) {
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  n=length(modules)
+  for (i in 1:n) {
+    object=mget(paste0("Genelist.c", cluster,".", modules[i]))
+    name=paste0("Genelist.c", cluster,".", modules[i],".id")
+    assign(name,getBM(attributes = c('external_gene_name','entrezgene_id',"gene_biotype"), filters='external_gene_name', values = object[1], mart = ensembl))
+  }
+}
+    
+```
+
+## Perform KEGG for every module of every cluster
+```{r}
+# Function
+KEGG<-function(x){
+  clusterProfiler::enrichKEGG(gene=x$entrezgene_id, organism = 'hsa', pvalueCutoff = 0.05)%>%setReadable(OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+}
+
+# Perform KEGG on every module of every cluster
+clusters=c(1:18)
+for (cluster in clusters) {
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  n=length(modules)
+  for (i in 1:n) {
+    genelist=mget(paste0("Genelist.c",cluster,".",modules[i],".id"))
+    genelist=genelist[[1]]
+    name=paste0("KEGG.c",cluster,".",modules[i])
+    assign(name,KEGG(genelist[2]))
+  }
+}
+```
+
+### Perform GO ALL for every module of every cluster
+```{r}
+# Function
+enrichGO_all<-function(x){
+  clusterProfiler::enrichGO(gene=x$entrezgene_id, OrgDb = org.Hs.eg.db, ont="ALL",pAdjustMethod = "BH", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05,readable = TRUE )
+}
+
+# Perform GO all on every module of every cluster
+clusters=c(1:1)
+for (cluster in clusters) {
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  n=length(modules)
+  for (i in 1:1) {
+    genelist=mget(paste0("Genelist.c",cluster,".",modules[i],".id"))
+    genelist=genelist[[1]]
+    name=paste0("GO_ALL.c",cluster,".",modules[i])
+    assign(name,enrichGO_all(genelist[2]))
+  }
+}
+
+X<-enrichGO(gene=Genelist.c16.white.id$entrezgene_id, OrgDb = org.Hs.eg.db, ont="ALL",pAdjustMethod = "BH", pvalueCutoff  = 0.01, qvalueCutoff  = 0.05,readable = TRUE )
+
+x<-X@result
+```
+
+
+### Visualize
+```{r}
+# Visualize
+for (cluster in 20) {
+  moduleColor=mget(paste0("moduleColors.",cluster))
+  moduleColor=moduleColor[[1]]
+  modules=moduleColor%>%unique
+  n=length(modules)
+  for (i in 1:n) {
+    KEGG=mget(paste0("KEGG.c",cluster,".",modules[i]))
+    KEGG=KEGG[[1]]
+    x=dotplot(KEGG, showCategory=10) + ggtitle(paste("KEGG C", cluster, "color", modules[i]))
+    print(x)
+  }  
+}
+```
